@@ -83,39 +83,3 @@ class Block_fold(nn.Module):
         out = ori / fold_mask
 
         return out
-
-# the implement of CMM in the paper
-class Block_search(nn.Module):
-    def __init__(self, x_ori, wsize=15, wstride=5):
-        super(Block_search, self).__init__()
-        self.ksize = wsize
-        self.stride = wstride
-        self.dis = torch.nn.PairwiseDistance(p=2, keepdim=True)
-
-        self.block_embedding = Block_embedding(wsize=self.ksize, wstride=self.stride)
-        block_query, _ = self.block_embedding.extract_image_blocks(x_ori, 
-            ksizes=[self.ksize, self.ksize], strides=[self.stride, self.stride])
-        self.block_query = block_query.squeeze(0).permute(1, 0) # num, l=c*h*w
-
-    def matrix_get_dis(self, x1, x2):
-        b = x1.size(0)
-        items = [self.dis(x1[i].unsqueeze(0), x2).unsqueeze(0) for i in range(b)]
-        dis_map = torch.cat(items, dim=0).squeeze(-1)
-
-        return dis_map
-
-    def forward(self, x, match_vec, idx):
-        block_key, _ = self.block_embedding.extract_image_blocks(x, 
-            ksizes=[self.ksize, self.ksize], strides=[self.stride, self.stride])
-        block_key = block_key.squeeze(0).permute(1, 0) # num, l=c*h*w
-        num = block_key.size(0) 
-        # obtain the index of the most similar block_query to block_key
-        dis_map = self.matrix_get_dis(block_key, self.block_query)
-        _, index = torch.topk(dis_map, 1, dim=1, largest=False, sorted=True) 
-        index = index.squeeze()
-        # change the gating state 
-        flag = (index == idx).int()
-        match_vec[flag == 1] = 1
-
-        return match_vec
-
