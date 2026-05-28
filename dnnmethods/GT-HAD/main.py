@@ -15,8 +15,7 @@ import time
 import torch.nn as nn 
 from torch.utils.data import DataLoader
 from data import DatasetHsi
-from block import Block_fold, Block_search
-# import cv2 
+from block import Block_fold, Block_embedding
 
 dtype = torch.cuda.FloatTensor
 os.environ["CUDA_VISIBLE_DEVICES"] = '0'
@@ -58,13 +57,13 @@ def main(file):
     block_size = patch_size * patch_stride # block_size is the sliding window size
     data_set = DatasetHsi(img_var, wsize=block_size, wstride=3)
     block_fold = Block_fold(wsize=block_size, wstride=3)
-    block_search = Block_search(img_var, wsize=block_size, wstride=3)
     data_loader = DataLoader(data_set, batch_size=64, shuffle=True, drop_last=False)
     # model setup
     # **************************************************************************************************************
-    # net
+    # net with differentiable soft gating
+    lambda_gate = 0.01  # Hyperparameter for gate entropy regularization
     net = Net(in_chans=band, embed_dim=64, patch_size=patch_size, 
-        patch_stride=patch_stride, mlp_ratio=2.0, attn_drop=0.0, drop=0.0)
+        patch_stride=patch_stride, mlp_ratio=2.0, attn_drop=0.0, drop=0.0, lambda_gate=lambda_gate)
     net = net.cuda()
     s = sum(np.prod(list(p.size())) for p in net.parameters())
     print ('Number of params: %d' % s)
@@ -75,36 +74,37 @@ def main(file):
     p = get_params(net)
     optimizer = Optim.Adam(p, lr=LR)
     print('Starting optimization with ADAM')
+    print(f'Gate regularization weight (lambda_gate): {lambda_gate}')
     # train
     # **************************************************************************************************************
     end_iter = 150
-    search_iter = 25 # [50, 100, 125]
     bar = Bar('Processing', max=end_iter)
     data_num = data_set.__len__()
-    match_vec = torch.zeros((data_num)).type(dtype)
-    search_matrix = torch.zeros((data_num, band, block_size, block_size)).type(dtype)
-    search_index = torch.arange(0, data_num).type(torch.cuda.LongTensor)
-    avgpool = nn.AvgPool3d(kernel_size=(5, 3, 3), stride=(1, 1, 1), padding=(2, 1, 1)) # k,s,p o=(i-k+2p)/s+1 
+    avgpool = nn.AvgPool3d(kernel_size=(5, 3, 3), stride=(1, 1, 1), padding=(2, 1, 1))
+    
     # start train
     start = time.time()
     for iter in range(1, end_iter + 1):
-        search_flag = True if iter % search_iter == 0 and iter != end_iter else False
         for idx, batch_data in enumerate(data_loader):
             optimizer.zero_grad()
-            # input -> net -> output
+            # input -> net -> output (single forward pass)
             net_gt, net_input, block_idx = batch_data['block_gt'], batch_data['block_input'], batch_data['index'].cuda()
-            net_out = net(net_input, block_idx=block_idx, match_vec=match_vec)
-            if search_flag: search_matrix[block_idx] = net_out
-            # cal loss
-            loss = mse(net_out, net_gt)
-            loss.backward()
+            
+            # Forward pass through network with differentiable soft gating
+            net_out = net(net_input)
+            
+            # Reconstruction loss
+            recon_loss = mse(net_out, net_gt)
+            
+            # Gate entropy regularization loss (prevents gate collapse)
+            gate_loss = net.compute_gate_loss()
+            
+            # Combined loss
+            total_loss = recon_loss + lambda_gate * gate_loss
+            
+            total_loss.backward()
             optimizer.step()
         
-        # CMM
-        if search_flag:
-            match_vec = torch.zeros((data_num)).type(dtype) # reset match_vec
-            search_back = block_fold(search_matrix.detach(), data_set.padding, row, col)
-            match_vec = block_search(search_back.detach(), match_vec, search_index)
         bar.next()
 
         # start test 
@@ -117,8 +117,9 @@ def main(file):
             for idx, data in enumerate(infer_loader):
                 infer_in = data['block_input']
                 infer_idx = data['index'].cuda()
-                # inference  
-                infer_out = net(infer_in, block_idx=infer_idx, match_vec=match_vec)
+                # Inference: single forward pass (no external routing state needed)
+                with torch.no_grad():
+                    infer_out = net(infer_in)
                 infer_res = torch.abs(infer_in - infer_out) ** 2
                 infer_res = avgpool(infer_res)
                 infer_res_list.append(infer_res)
@@ -146,4 +147,3 @@ if __name__ == "__main__":
             #     ['los-angeles-1', 'los-angeles-2', 'gulfport', 
             # 'texas-goast', 'cat-island', 'pavia']:
         main(file)
-
