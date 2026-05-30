@@ -45,9 +45,19 @@ class Attention(nn.Module):
             nn.Flatten(),
             nn.Linear(dim, dim // 4),
             nn.GELU(),
-            nn.Linear(dim // 4, dim),
-            nn.Sigmoid()
+            nn.Linear(dim // 4, dim)
         )
+        self.gate_proj = nn.Sequential(
+            nn.Linear(dim, self.hidden_dim),
+            nn.GELU(),
+            nn.Linear(self.hidden_dim, self.hidden_dim),
+            nn.Sigmoid()
+          )
+        for layer in self.gate:
+          if isinstance(layer, nn.Linear):
+            nn.init.xavier_uniform_(layer.weight)
+            nn.init.zeros_(layer.bias)
+        self.gate[-1].bias.data.fill_(-5.0)
 
     def _branch_forward(self, x_q, x_v, mask):
         attn = x_q @ x_q.transpose(-2, -1)
@@ -86,9 +96,11 @@ class Attention(nn.Module):
         bfb_out = self._tokens_to_spatial(bfb_tok, B, H, W)
 
         if fi is not None:
-            gi = self.gate(fi)
-            gi_h = gi[:, :self.hidden_dim]
-            gi_h = gi_h.view(B, 1, 1, self.hidden_dim)
+            gate_logits = self.gate(fi)
+            tau=0.1
+            gi = torch.sigmoid(gate_logits / tau)
+            gi_h = self.gate_proj(gi)
+            gi_h = gi_h.view(B,1,1,self.hidden_dim)
             self.last_gate = gi.unsqueeze(-1).unsqueeze(-1)
         else:
             gi_h = torch.full((B, 1, 1, self.hidden_dim), 0.5, device=x.device)
