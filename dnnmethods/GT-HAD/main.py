@@ -16,6 +16,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from data import DatasetHsi
 from block import Block_fold, Block_embedding
+import torch.nn.functional as F
 
 dtype = torch.cuda.FloatTensor
 os.environ["CUDA_VISIBLE_DEVICES"] = '0'
@@ -77,7 +78,7 @@ def main(file):
     print(f'Gate regularization weight (lambda_gate): {lambda_gate}')
     # train
     # **************************************************************************************************************
-    end_iter = 150
+    end_iter = 250
     bar = Bar('Processing', max=end_iter)
     data_num = data_set.__len__()
     avgpool = nn.AvgPool3d(kernel_size=(5, 3, 3), stride=(1, 1, 1), padding=(2, 1, 1))
@@ -95,12 +96,18 @@ def main(file):
             
             # Reconstruction loss
             recon_loss = mse(net_out, net_gt)
+            pred_norm = F.normalize(net_out, p=2, dim=1)
+            target_norm = F.normalize(net_gt, p=2, dim=1)
+            cos_sim = torch.sum(pred_norm * target_norm, dim=1)
+            sam_loss = (1 - cos_sim).mean()
             
             # Gate entropy regularization loss (prevents gate collapse)
-            gate_loss = net.compute_gate_loss()
-            
+            # gate_loss = net.compute_gate_loss()
+            # Temporarily removed the Gate loss
             # Combined loss
-            total_loss = recon_loss + lambda_gate * gate_loss
+            alpha=0.7
+            beta=0.3
+            total_loss = alpha*recon_loss + beta*sam_loss
             
             total_loss.backward()
             optimizer.step()
